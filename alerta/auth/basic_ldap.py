@@ -11,17 +11,18 @@ from alerta.utils.audit import auth_audit_trail
 
 
 def login():
-    # Allow LDAP server to use a self signed certificate
-    if current_app.config['LDAP_ALLOW_SELF_SIGNED_CERT']:
-        ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, ldap.OPT_X_TLS_ALLOW)
 
     if current_app.config['LDAP_CACERT']:
         ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, ldap.OPT_X_TLS_HARD)
         ldap.set_option(ldap.OPT_X_TLS_CACERTFILE, current_app.config['LDAP_CACERT'])
 
+    # Allow LDAP server to use a self signed certificate
+    if current_app.config['LDAP_ALLOW_SELF_SIGNED_CERT']:
+        ldap.set_option(ldap.OPT_X_TLS_REQUIRE_CERT, ldap.OPT_X_TLS_ALLOW)
+
     # Retrieve required fields from client request
     try:
-        login = request.json.get('username', None) or request.json['email']
+        login = request.json.get('username') or request.json['email']
         password = request.json['password']
     except KeyError:
         raise ApiError("must supply 'username' and 'password'", 401)
@@ -42,14 +43,13 @@ def login():
         if current_app.config['LDAP_DEFAULT_DOMAIN']:
             username = login
             domain = current_app.config['LDAP_DEFAULT_DOMAIN']
-            email = username + '@' + domain
+            email = '{}@{}'.format(username, domain)
             email_verified = True
         else:
             raise ApiError('expected username with domain', 401)
 
     # Validate LDAP domain
-    if domain not in current_app.config['LDAP_DOMAINS'] and \
-       domain not in current_app.config['LDAP_DOMAINS_SEARCH_QUERY']:
+    if domain not in current_app.config['ALLOWED_EMAIL_DOMAINS']:
         raise ApiError('unauthorized domain', 403)
 
     # Initialise ldap connection
@@ -68,22 +68,22 @@ def login():
     #       Except: Search query is bad defined
     # Else
     #   Set the DN as the one found in LDAP_DOMAINS variable
-    domain_search_query = current_app.config.get('LDAP_DOMAINS_SEARCH_QUERY', {})
-    base_dns = current_app.config.get('LDAP_DOMAINS_BASEDN', {})
-    user_base_dn = current_app.config.get('LDAP_DOMAINS_USER_BASEDN', {})
-    if domain in domain_search_query:
-        ldap_bind_username = current_app.config.get('LDAP_BIND_USERNAME', '')
-        ldap_bind_password = current_app.config.get('LDAP_BIND_PASSWORD', '')
+    search_query = current_app.config['LDAP_SEARCH_QUERY']
+    base_dn = current_app.config['LDAP_BASEDN']
+    user_base_dn = current_app.config['LDAP_USER_BASEDN']
+    if search_query:
+        ldap_bind_username = current_app.config['LDAP_BIND_USERNAME']
+        ldap_bind_password = current_app.config['LDAP_BIND_PASSWORD']
 
         try:
             ldap_connection.simple_bind_s(ldap_bind_username, ldap_bind_password)
         except ldap.INVALID_CREDENTIALS:
-            raise ApiError('invalid ldap bind username or password', 401)
+            raise ApiError('invalid ldap bind credentials', 500)
 
         ldap_users = [(_dn, user) for _dn, user in ldap_connection.search_s(
-            base_dns[domain] if user_base_dn.get(domain) is None else user_base_dn[domain],
+            user_base_dn or base_dn,
             ldap.SCOPE_SUBTREE,
-            domain_search_query[domain].format(username=username, email=email),
+            search_query.format(username=username, email=email),
             ['mail']
         ) if _dn is not None]
 
@@ -99,7 +99,7 @@ def login():
                 email = email_attr[0].decode(sys.stdout.encoding)
                 email_verified = True
     else:
-        userdn = current_app.config['LDAP_DOMAINS'][domain] % username
+        userdn = current_app.config['LDAP_USER_BASEDN'].format(username=username, email=email)
 
     # Attempt LDAP AUTH
     try:
